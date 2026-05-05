@@ -1,0 +1,160 @@
+networks:
+  traefik:  # external network to attach containers
+    name: traefik
+    external: true
+  docker-proxynet:  # internal network
+    driver: bridge
+    internal: true
+    attachable: false
+    ipam:
+      config:
+        - subnet: 192.168.16.0/24
+          gateway: 192.168.16.1
+
+services:
+  dockerproxy: # see https://github.com/Tecnativa/docker-socket-proxy
+    image: ghcr.io/tecnativa/docker-socket-proxy
+    container_name: dockerproxy
+    environment:
+      - CONTAINERS=1  # enable CONTAINERS API
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro # never expose this container to the internet!
+    networks:
+      - docker-proxynet # use only internal network
+
+  authentik-proxy:
+    image: ghcr.io/goauthentik/proxy:2025.10
+    container_name: traefik_authentik-proxy
+    networks:
+      - traefik
+    env_file:
+      - authentik_proxy.env
+    labels:
+      - "traefik.docker.network=traefik"
+      - "traefik.enable=true"
+      - "traefik.http.routers.authentik.entrypoints=internal"
+      - "traefik.http.services.authentik.loadbalancer.server.port=9000"
+      # `authentik-proxy` refers to the service name in the compose file.
+      - "traefik.http.middlewares.authentik.forwardauth.address=http://authentik-proxy:9000/outpost.goauthentik.io/auth/traefik"
+      - "traefik.http.middlewares.authentik.forwardauth.trustForwardHeader=true"
+      - "traefik.http.middlewares.authentik.forwardauth.authResponseHeaders=X-authentik-username,X-authentik-groups,X-authentik-email,X-authentik-name,X-authentik-uid,X-authentik-jwt,X-authentik-meta-jwks,X-authentik-meta-outpost,X-authentik-meta-provider,X-authentik-meta-app,X-authentik-meta-version"
+    restart: unless-stopped
+
+  traefik:
+    image: traefik:latest
+    container_name: traefik
+    user: "2000:2000" # user traefik has to be created on the host system
+    command:
+      # Debug & API
+      - --api.dashboard=true
+      - --log.level=DEBUG # for debugging
+      - --accessLog.filePath=/var/log/access.log
+      - --accessLog.format=json
+      - --accessLog.filters.statusCodes=400-499
+      - --accessLog.fields.defaultmode=drop
+      - --accessLog.fields.names.ClientAddr=keep
+      - --accessLog.fields.names.OriginStatus=keep
+      - --accessLog.fields.names.DownstreamStatus=keep
+      - --accessLog.fields.names.RouterName=keep
+      - --accessLog.fields.names.RequestAddr=keep
+      - --accessLog.fields.names.RequestMethod=keep
+      - --accessLog.fields.names.RequestPath=keep
+      - --accessLog.fields.names.RetryAttempts=keep
+      - --accessLog.fields.names.ServiceAddr=keep
+      # Provider
+      - --providers.docker=true
+      - --providers.docker.watch
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.endpoint=tcp://dockerproxy:2375 # endpoint to get docker access
+      - --providers.docker.network=traefik # network to attach containers
+      # kubernetes, toggle if you need
+      #- --providers.kubernetesingress=true
+      # Config
+      - --providers.file.directory=/etc/traefik/dynamic/
+      # Entrypoints
+      - --entrypoints.web.address=:80 # http used for internet facing
+      - --entrypoints.websecure.address=:443 # https used for internet facing
+      - --entryPoints.websecure.http3
+      - --entrypoints.websecure.http3.advertisedport=443 # change if your external port differs
+      - --entrypoints.internal.address=:8080 # https used for internal facing
+      - --entrypoints.web.http.redirections.entryPoint.to=websecure
+      - --entrypoints.web.http.redirections.entryPoint.scheme=https
+      # Certs
+      #- --certificatesresolvers.myhttpchallenge.acme.caserver=https://acme-staging-v02.api.letsencrypt.org/directory # used for testing and staging
+      - --certificatesresolvers.myhttpchallenge.acme.caserver=https://acme-v02.api.letsencrypt.org/directory # used for prod
+      - --certificatesresolvers.myhttpchallenge.acme.httpchallenge=true
+      - --certificatesresolvers.myhttpchallenge.acme.httpchallenge.entrypoint=web
+      - --certificatesresolvers.myhttpchallenge.acme.email=${TRAEFIK_EMAIL}
+      - --certificatesresolvers.myhttpchallenge.acme.storage=/certs/acme.json
+      - --serverstransport.insecureskipverify=true
+      # Metrics
+      - --metrics.prometheus=true # Enable Prometheus metrics
+      - --metrics.prometheus.addrouterslabels=true
+      - --metrics.prometheus.manualrouting=true
+      - --metrics.prometheus.buckets=0.1,0.3,1.2,5.0 # Set the bucket usually in seconds
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      traefik:
+        ipv4_address: 172.24.0.200
+      docker-proxynet:
+    ports:
+      - "80:80" # http
+      - "443:443/tcp" # https
+      - "443:443/udp" # http3
+      - "8080:8080" # service
+    volumes:
+      - ./config/dynamic/:/etc/traefik/dynamic/:ro # Dynamic Traefik Configuration
+      - ./data/acme.json:/certs/acme.json
+      - ./log/:/var/log/
+    restart: unless-stopped
+    depends_on:
+      - dockerproxy
+    read_only: true
+    labels:
+      - "traefik.docker.network=traefik"
+      - "traefik.enable=true"
+      - "traefik.http.middlewares.metric-auth.basicauth.users=${METIC_AUTH}"
+      - "traefik.http.middlewares.metric-auth.basicauth.removeheader=true"
+      # HTTP-to-HTTPS Redirect only use if --entrypoints.web.http.redirections.entryPoint.to=websecure is not working 
+      #- "traefik.http.routers.http-catchall.entrypoints=web"
+      #- "traefik.http.routers.http-catchall.rule=HostRegexp(`{host:.+}`)"
+      #- "traefik.http.routers.http-catchall.middlewares=redirect-to-https"
+      #- "traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=websecure"
+      # Dashboard
+      - "traefik.http.routers.dashboard.entrypoints=internal"
+      - "traefik.http.routers.dashboard.rule=Host(${TRAEFIK_ENTRYPOINT})"
+      - "traefik.http.routers.dashboard.tls=true"
+      - "traefik.http.routers.dashboard.tls.certresolver=myhttpchallenge"
+      - "traefik.http.routers.dashboard.service=api@internal"
+      - "traefik.http.routers.dashboard.middlewares=authentik@docker"
+      #- "traefik.http.routers.dashboard.middlewares=traefik-auth"
+      - "traefik.http.middlewares.test-ratelimit.ratelimit.average=100"
+      - "traefik.http.middlewares.test-ratelimit.ratelimit.burst=50"
+      # Metrics
+      - "traefik.http.routers.metrics.entrypoints=internal"
+      - "traefik.http.routers.metrics.rule=Host(${PROMETHEUS_ENTRYPOINT}) && PathPrefix(`/metrics`)"
+      - "traefik.http.routers.metrics.tls=true"
+      - "traefik.http.routers.metrics.tls.certresolver=myhttpchallenge"
+      - "traefik.http.routers.metrics.service=prometheus@internal"
+      - "traefik.http.routers.metrics.middlewares=metric-auth"
+
+  #whoami: # used for testing
+  #  image: containous/whoami
+  #  container_name: whoami
+  #  labels:
+  #    - "traefik.enable=true"
+  #    - "traefik.docker.network=traefik"
+  #    - "traefik.http.routers.whoami.rule=Host(${WHOAMI_ENTRYPOINT})"
+  #    - "traefik.http.routers.whoami.entrypoints=websecure"
+  #    - "traefik.http.routers.whoami.tls=true"
+  #    - "traefik.http.routers.whoami.tls.certresolver=myhttpchallenge"
+  #    - "traefik.http.routers.whoami.service=whoami"
+  #    - "traefik.http.services.whoami.loadbalancer.server.port=80"
+  #    - "traefik.http.routers.whoami.middlewares=authentik@docker"
+  #  restart: unless-stopped
+  #  networks:
+  #    - traefik
