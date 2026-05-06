@@ -117,8 +117,6 @@ services:
     labels:
       - "traefik.docker.network=traefik"
       - "traefik.enable=true"
-      - "traefik.http.middlewares.metric-auth.basicauth.users=${METRIC_AUTH}"
-      - "traefik.http.middlewares.metric-auth.basicauth.removeheader=true"
       # HTTP-to-HTTPS Redirect only use if --entrypoints.web.http.redirections.entryPoint.to=websecure is not working 
       #- "traefik.http.routers.http-catchall.entrypoints=web"
       #- "traefik.http.routers.http-catchall.rule=HostRegexp(`{host:.+}`)"
@@ -130,10 +128,7 @@ services:
       - "traefik.http.routers.dashboard.tls=true"
       - "traefik.http.routers.dashboard.tls.certresolver=myhttpchallenge"
       - "traefik.http.routers.dashboard.service=api@internal"
-      - "traefik.http.routers.dashboard.middlewares=authentik@docker"
-      #- "traefik.http.routers.dashboard.middlewares=traefik-auth"
-      - "traefik.http.middlewares.test-ratelimit.ratelimit.average=100"
-      - "traefik.http.middlewares.test-ratelimit.ratelimit.burst=50"
+      - "traefik.http.routers.dashboard.middlewares=authentik@docker" # middleware defined in authentik proxy
       # Metrics
       - "traefik.http.routers.metrics.entrypoints=internal"
       - "traefik.http.routers.metrics.rule=Host(${TRAEFIK_ENTRYPOINT}) && PathPrefix(`/metrics`)"
@@ -141,6 +136,8 @@ services:
       - "traefik.http.routers.metrics.tls.certresolver=myhttpchallenge"
       - "traefik.http.routers.metrics.service=prometheus@internal"
       - "traefik.http.routers.metrics.middlewares=metric-auth"
+      - "traefik.http.middlewares.metric-auth.basicauth.users=${METRIC_AUTH}"
+      - "traefik.http.middlewares.metric-auth.basicauth.removeheader=true"
 
   #whoami: # used for testing
   #  image: containous/whoami
